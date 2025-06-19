@@ -24,24 +24,6 @@ class NaryOp extends Symbol {
         // TODO
     }
 
-    #constValue(node) {
-        if (node.checkName("Constant")) return node.value;
-        if (node.checkName("UnaryOp")) {
-            const v = this.#constValue(node.operand);
-            if (v === null) return null;
-
-            switch (node.type) {
-                case NEGATE: return -v;
-                case ABSOLUTE: return Math.abs(v);
-            }
-        }
-        return null;
-    }
-
-    simplify() {
-        return this;
-    }
-
     toString() {
         return this.arr.map(v => v.toString()).join(` ${this.type} `);
     }

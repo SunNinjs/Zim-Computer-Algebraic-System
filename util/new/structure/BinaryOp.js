@@ -382,7 +382,7 @@ class BinaryOp extends Symbol {
             if (lnode.checkName("BinaryOp")) {
                 nl = this.#identityFold(lnode);
             }
-            return new BinaryOp(nr, nl, node.type);
+            return new BinaryOp(nl, nr, node.type);
         }
 
         switch (node.type) {
@@ -490,18 +490,19 @@ class BinaryOp extends Symbol {
             } else coeffs.set(key, constant)
         }
 
-        for (let val of addOp.arr) {
+        for (let { node, sign } of addOp.arr) {
+            let val = node;
             // Any Constamt terms getting added up including |3| and -3
             if (val.checkName("Constant")) {
-                constSum += val.value;
+                constSum += sign * val.value;
             } else if (val.checkName("UnaryOp") && val?.operand.checkName("Constant") && val?.type == NEGATE) {
-                constSum += -val.operand.value;
+                constSum += -(sign * val.operand.value);
             } else if (val.checkName("UnaryOp") && val?.operand.checkName("Constant") && val?.type == ABSOLUTE) {
                 constSum += Math.abs(val.operand.value);
 
                 // Checking Variable Terms [x]
             } else if (val.checkName("Variable")) {
-                mapInp(val.value, 1);
+                mapInp(val.value, sign * 1);
 
                 // Checking Multiplication of term [3x || x * 3 || 3x^2]
             } else if (val.checkName("BinaryOp") && val?.type == MULTIPLY) {
@@ -519,14 +520,14 @@ class BinaryOp extends Symbol {
 
                     // 3x || x * 3
                     if (exp.checkName("Variable")) {
-                        mapInp(exp.value, cons)
+                        mapInp(exp.value, sign * cons)
 
                         // 3x^2 || x^2 * 3
                     } else if (exp.checkName("BinaryOp") && exp?.type == POWER) {
                         if (exp.left.checkName("Variable")) {
                             let key_string = `${exp.left.value} - ${exp.right.toString()}`
                             let map_val = {
-                                count: coeffs.get(key_string) == undefined ? cons : coeffs.get(key_string).count + cons,
+                                count: coeffs.get(key_string) == undefined ? sign * cons : coeffs.get(key_string).count + (sign * cons),
                                 obj: exp
                             }
                             coeffs.set(key_string, map_val)
@@ -553,20 +554,33 @@ class BinaryOp extends Symbol {
             }
         }
         if (constSum != 0) new_arr.push(new Constant(constSum));
-        new_arr.concat(left);
+        new_arr = new_arr.concat(left);
 
         addOp.arr = new_arr;
         return addOp;
     }
 
-    #gather(node, parts, type) {
-        // (2 + (2 + (2 + (2 + x))))
-        if (node.checkName("BinaryOp") && node?.type == type) {
-            this.#gather(node.left, parts, type);
-            this.#gather(node.right, parts, type);
-        } else {
-            parts.push(node);
+    #gather(node, parts, op, sign = 1) {
+        // Only BinaryOp nodes can be further split
+        if (node.checkName("BinaryOp")) {
+            // Same operator keep flattening
+            if (node.type === op) {
+                this.#gather(node.left, parts, op, sign);
+                this.#gather(node.right, parts, op, sign);
+                return;
+            }
+
+            // Special case:  subtraction inside an addition chain
+            // A - B  ==  A + (-1 * B), so flip the sign for the right child
+            if (op === ADD && node.type === SUBTRACT) {
+                this.#gather(node.left, parts, op, sign);      // keep sign
+                this.#gather(node.right, parts, op, -sign);      // negate
+                return;
+            }
         }
+
+        // Leaf or different operator → store with current sign
+        parts.push({ node, sign });
     }
 
 }
