@@ -24,6 +24,10 @@ class NaryOp extends Symbol {
         // TODO
     }
 
+    simplify() {
+        this.arr = this.arr.map(v => v.simplify())
+    }
+
     toString() {
         return this.arr.map(v => v.toString()).join(` ${this.type} `);
     }

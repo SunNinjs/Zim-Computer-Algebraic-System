@@ -1,4 +1,5 @@
 const Symbol = require('./Symbol');
+const Constant = require(`../types/leafs/Constant`)
 const { UNARY_TYPES } = require('../types/Types');
 
 const { NEGATE, ABSOLUTE, LOGARITHM, EXPONENTIAL } = UNARY_TYPES;
@@ -17,6 +18,9 @@ class UnaryOp extends Symbol {
             if ((type == NEGATE)) {
                 return operand.operand;
             } else if (type == ABSOLUTE) return new UnaryOp(operand.operand, ABSOLUTE);
+        } else if (operand.checkName("Constant")) {
+            if (operand.value == 0) return operand;
+            if (operand.value < 0) return new Constant(Math.abs(operand.value));
         }
 
         this.operand = operand.simplify();

@@ -47,24 +47,23 @@ class BinaryOp extends Symbol {
     }
 
     simplify() {
-        let oldNode = this;
-        let newNode;
-        let unchanged = true;
+        let cur, next = this;
         do {
-            newNode = this.#fold_constants(oldNode);
-            if (newNode.checkName("Constant")) return newNode;
-            newNode = oldNode._peakFlatten();
-            if (newNode.checkName("Constant")) return newNode;
-            if (newNode.left != oldNode.left || newNode.right != oldNode.right) oldNode = newNode;
-            newNode = this.#identityFold(oldNode);
-            if (newNode.left != oldNode.left || newNode.right != oldNode.right) oldNode = newNode;
-            newNode = this.#flatten(oldNode);
-            if (newNode.checkName("NaryOp")) return newNode;
-            if (newNode.left != oldNode.left || newNode.right != oldNode.right) oldNode = newNode;
-            if (newNode.left == oldNode.left && newNode.right == oldNode.right) unchanged = false;
-        } while (unchanged)
+            cur = next;
+            if (cur.checkName("UnaryOp")) return cur;
+            next = this.#fold_constants(next);
+            if (next.checkName("Constant")) return next;
 
-        return newNode;
+            next = next._peakFlatten();
+            if (next.checkName("Constant")) return next;
+
+            next = this.#identityFold(next);
+
+            next = this.#flatten(next);
+
+        } while (!this.#astEqual(next, cur))
+
+        return next;
     }
 
     toString() {
@@ -125,9 +124,22 @@ class BinaryOp extends Symbol {
 
         let lv = this.#constValue(this.left);
         let rv = this.#constValue(this.right);
+
         if (lv == null && rv == null) {
             let nr = this.right;
             let nl = this.left;
+
+            if (this.type == ADD) {
+                if (nl?.type == DIVIDE && nr?.type == DIVIDE) {
+                    // (a / b) + (c / d) => (ad + cb) / bd
+                    let denominator = bin(nl.right, nr.right, MULTIPLY);
+                    let lnum = bin(nl.left, nr.right, MULTIPLY);
+                    let rnum = bin(nr.left, nl.right, MULTIPLY);
+                    let numerator = bin(lnum, rnum, ADD);
+                    return bin(numerator, denominator, DIVIDE);
+                }
+            }
+
             if (this.right.checkName("BinaryOp")) {
                 nr = this.right._peakFlatten();
             }
@@ -135,11 +147,42 @@ class BinaryOp extends Symbol {
             if (this.left.checkName("BinaryOp")) {
                 nl = this.left._peakFlatten();
             }
-            return new BinaryOp(nl, nr, this.type)
+
+            if (nl === this.left && nr === this.right) {
+                return this;
+            }
+            return new BinaryOp(nl, nr, this.type);
+
         } // If Both values are not constant, cannot flatten
 
         lv = lv == null ? this.#flatCheck(this.left) : new Constant(lv);
         rv = rv == null ? this.#flatCheck(this.right) : new Constant(rv);
+
+        if (this.left.checkName("UnaryOp") && this.left.type == NEGATE && this.left.operand.checkName("BinaryOp")) {
+            let op = this.left.operand;
+            if (op.type == ADD || op.type == SUBTRACT) {
+                let nl = op.left.checkName("Constant") ? new Constant(-op.left.value) : neg(op.left);
+                lv = bin(nl, op.right, op.type == ADD ? SUBTRACT : ADD);
+            }
+
+            if (op.type == MULTIPLY || op.type == DIVIDE) {
+                let nl = op.left.checkName("Constant") ? new Constant(-op.left.value) : neg(op.left);
+                lv = bin(nl, op.right, op.type)
+            }
+        }
+
+        if (this.right.checkName("UnaryOp") && this.right.type == NEGATE && this.right.operand.checkName("BinaryOp")) {
+            let op = this.right.operand;
+            if (op.type == ADD || op.type == SUBTRACT) {
+                let nl = op.left.checkName("Constant") ? new Constant(-op.left.value) : neg(op.left);
+                rv = bin(nl, op.right, op.type == ADD ? SUBTRACT : ABSOLUTE);
+            }
+
+            if (op.type == MULTIPLY || op.type == DIVIDE) {
+                let nl = op.left.checkName("Constant") ? new Constant(-op.left.value) : neg(op.left);
+                rv = bin(nl, op.right, op.type)
+            }
+        }
 
         if (lv !== null && rv !== null) {
             switch (this.type) {
@@ -177,6 +220,7 @@ class BinaryOp extends Symbol {
                             if (nv < 0) return bin(rv.left, new Constant(-nv), SUBTRACT);
                         }
                     }
+
                     return this;
                 }
                 case SUBTRACT: {
@@ -271,6 +315,22 @@ class BinaryOp extends Symbol {
                         }
                     }
 
+                    if (lv?.type == ADD || lv?.type == SUBTRACT) {
+                        // (x + 5) * 3 => (3 * x + 15) || (5 + x) * 3 => (15 + 3 *)
+                        if (rv.value == 0) return new Constant(0);
+                        let nl = lv.left.checkName("Constant") ? new Constant(lv.left.value * rv.value) : bin(rv, lv.left, MULTIPLY);
+                        let nr = lv.right.checkName("Constant") ? new Constant(lv.right.value * rv.value) : bin(rv, lv.right, MULTIPLY);
+                        return bin(nl, nr, lv.type);
+                    }
+
+                    if (rv?.type == ADD || rv?.type == SUBTRACT) {
+                        // 3 * (x + 5) => (3 * x + 15) || 3 * (5 + x) => (15 + 3 * x)
+                        if (rv.value == 0) return new Constant(0);
+                        let nl = rv.left.checkName("Constant") ? new Constant(rv.left.value * lv.value) : bin(lv, rv.left, MULTIPLY);
+                        let nr = rv.right.checkName("Constant") ? new Constant(rv.right.value * lv.value) : bin(lv, rv.right, MULTIPLY);
+                        return bin(nl, nr, rv.type);
+                    }
+
                     return this;
                 }
                 case DIVIDE: {
@@ -335,6 +395,14 @@ class BinaryOp extends Symbol {
                         }
                     }
 
+                    if (lv?.type == ADD || lv?.type == SUBTRACT) {
+                        // (5 - x) / 3 => 5 / 3 - x / 3 || (x - 5) / 3 => x / 3 - 5 / 3
+                        if (rv.value == 0) throw new Error("Division by Zero");
+                        let nl = lv.left.checkName("Constant") ? new Constant(lv.left.value / rv.value) : bin(lv.left, rv, DIVIDE);
+                        let nr = lv.right.checkName("Constant") ? new Constant(lv.right.value / rv.value) : bin(lv.right, rv, DIVIDE);
+                        return bin(nl, nr, lv.type);
+                    }
+
                     return this;
                 }
                 default: return this
@@ -359,10 +427,10 @@ class BinaryOp extends Symbol {
      * @returns 
      */
     #identityFold(node) {
-        const isZero = (node) => node.checkName("Constant") && node?.value == 0;
+        const isZero = (node) => node.checkName("Constant") && node?.value == 0 || (node.checkName("UnaryOp") && node?.type == NEGATE && node?.operand.value == 0);
         const isOne = (node) => node.checkName("Constant") && node?.value == 1;
-        const isNOne = (node) => (node.checkName("Constant") && node?.value == -1) || (node.checkName("UnaryOp") && node?.type == NEGATE && node?.operand == 1);
-        const isVar = (node) => node.checkName("Variable")
+        const isNOne = (node) => (node.checkName("Constant") && node?.value == -1) || (node.checkName("UnaryOp") && node?.type == NEGATE && node?.operand.value == 1);
+        const isVar = (node) => node.checkName("Variable") || (node.checkName("UnaryOp") && node?.type == NEGATE && node?.operand.checkName("Variable"))
         const ConstorVar = (node) => {
             if (this.#constValue(node) != null) return new Constant(this.#constValue(node));
             if (isVar(node)) return node;
@@ -371,6 +439,8 @@ class BinaryOp extends Symbol {
 
         let rnode = node.right;
         let lnode = node.left;
+
+        if (node.checkName("UnaryOp")) return node;
 
         if (ConstorVar(node.right) == null && ConstorVar(node.left) == null) {
             let nr = rnode;
@@ -427,6 +497,11 @@ class BinaryOp extends Symbol {
                 if (isNOne(rnode)) return new UnaryOp(lnode, NEGATE);
                 // x / x => 1
                 if (isVar(rnode) && isVar(lnode) && rnode?.value == lnode?.value) return new Constant(1);
+                // x / C => (1 / C) * x
+                if (isVar(lnode)) {
+                    if (lnode.checkName("UnaryOp")) return new BinaryOp(new BinaryOp(new Constant(-1), rnode, DIVIDE), lnode.operand, MULTIPLY)
+                    return new BinaryOp(new BinaryOp(new Constant(1), rnode, DIVIDE), lnode, MULTIPLY)
+                };
                 return node;
             }
             case POWER: {
@@ -463,101 +538,112 @@ class BinaryOp extends Symbol {
             return null;
         }
 
-        if (node.type != ADD && node.type != MULTIPLY) return node; // Return if node is not add or multiply
+        if (node.type != ADD && node.type != SUBTRACT) return node; // Return if node is not add or multiply
         let add_arr = [];
         this.#gather(node, add_arr, ADD);
         let addOp = new NaryOp(ADD, add_arr);
         //console.log(addOp)
-        this.#combineTerms(addOp);
-        return addOp;
+        return this.#combineTerms(addOp);
 
         //let mul_arr = [];
         //this.#gather(node, mul_arr, MULTIPLY)
         //let mulOp = new NaryOp(MULTIPLY, mul_arr);
     }
 
-    /**
-     * @param {NaryOp} addOp 
-     * @param {NaryOp} mulOp 
-     */
     #combineTerms(addOp) {
+        const parts = addOp.arr;
+        const coeffs = new Map();
+        const exponents = new Map();
         let constSum = 0;
-        let coeffs = new Map();
-        let left = []
-        const mapInp = (key, constant) => {
-            if (coeffs.has(key)) {
-                coeffs.set(key, coeffs.get(key) + constant)
-            } else coeffs.set(key, constant)
-        }
+        const leftovers = [];
+        const addCoeff = (map, key, delta) => map.set(key, (map.get(key) || 0) + delta);
 
-        for (let { node, sign } of addOp.arr) {
-            let val = node;
-            // Any Constamt terms getting added up including |3| and -3
-            if (val.checkName("Constant")) {
-                constSum += sign * val.value;
-            } else if (val.checkName("UnaryOp") && val?.operand.checkName("Constant") && val?.type == NEGATE) {
-                constSum += -(sign * val.operand.value);
-            } else if (val.checkName("UnaryOp") && val?.operand.checkName("Constant") && val?.type == ABSOLUTE) {
-                constSum += Math.abs(val.operand.value);
+        for (let { node, sign } of parts) {
+            if (node.checkName("UnaryOp") && node?.type === NEGATE) {
+                node = node.operand;
+                sign = -sign;
+            }
 
-                // Checking Variable Terms [x]
-            } else if (val.checkName("Variable")) {
-                mapInp(val.value, sign * 1);
+            if (node.checkName("Constant")) {
+                constSum += sign * node.value;
+            }
 
-                // Checking Multiplication of term [3x || x * 3 || 3x^2]
-            } else if (val.checkName("BinaryOp") && val?.type == MULTIPLY) {
-                let rv = this.#constValue(val.right);
-                let lv = this.#constValue(val.left);
+            else if (node.checkName("Variable")) {
+                addCoeff(coeffs, node.value, sign);
+            }
 
-                if (lv == null && rv == null) {
-                    left.push(val);
-                    continue;
+            else if (node.checkName("BinaryOp") && node.type === MULTIPLY) {
+                const lConst = this.#constValue(node.left);
+                const rConst = this.#constValue(node.right);
+
+                // only linear terms  (k·x) or (x·k)
+                if (lConst !== null && node.right.checkName("Variable")) {
+                    addCoeff(coeffs, node.right.value, sign * lConst);
+                }
+                else if (rConst !== null && node.left.checkName("Variable")) {
+                    addCoeff(coeffs, node.left.value, sign * rConst);
+                }
+                // simple powers  (k·x^n)
+                else if (lConst !== null && node.right.checkName("BinaryOp") && node.right.type === POWER && node.right.left.checkName("Variable")) {
+                    const key = `${node.right.left.value}^${node.right.right.toString()}`;
+                    addCoeff(exponents, key, sign * lConst);
                 }
 
-                if (lv != null || rv != null) {
-                    let cons = rv == null ? val.left : val.right;
-                    let exp = rv == null ? val.right : val.left;
+                else if (rConst !== null && node.left.checkName("BinaryOp") && node.left.type === POWER && node.left.left.checkName("Variable")) {
+                    const key = `${node.left.left.value}^${node.left.right.toString()}`;
+                    addCoeff(exponents, key, sign * rConst);
+                }
 
-                    // 3x || x * 3
-                    if (exp.checkName("Variable")) {
-                        mapInp(exp.value, sign * cons)
-
-                        // 3x^2 || x^2 * 3
-                    } else if (exp.checkName("BinaryOp") && exp?.type == POWER) {
-                        if (exp.left.checkName("Variable")) {
-                            let key_string = `${exp.left.value} - ${exp.right.toString()}`
-                            let map_val = {
-                                count: coeffs.get(key_string) == undefined ? sign * cons : coeffs.get(key_string).count + (sign * cons),
-                                obj: exp
-                            }
-                            coeffs.set(key_string, map_val)
-                        }
-                    } else left.push(val);
-
-                } else left.push(val);
-            } else left.push(val);
-
-        }
-        // End of Loop
-
-        let new_arr = [];
-        for (let [key, value] of coeffs) {
-            if (value instanceof Object && value?.count != undefined) {
-                let { count, obj } = value;
-                if (count == 0) continue;
-                let term = count == 1 ? obj : (new BinaryOp(new Constant(count), obj, MULTIPLY));
-                new_arr.push(term);
-            } else {
-                if (value == 0) continue;
-                let term = value == 1 ? (new Variable(key)) : (new BinaryOp(new Constant(value), new Variable(key), MULTIPLY));
-                new_arr.push(term);
+                else leftovers.push({ node, sign });
             }
-        }
-        if (constSum != 0) new_arr.push(new Constant(constSum));
-        new_arr = new_arr.concat(left);
 
-        addOp.arr = new_arr;
-        return addOp;
+            else leftovers.push({ node, sign });
+        }
+
+        const outTerms = [];
+
+        // (a) plain variables, alphabetically
+        [...coeffs.keys()].sort().forEach(v => {
+            const c = coeffs.get(v);
+            if (c === 0) return;
+            if (c === 1) outTerms.push(new Variable(v));
+            else if (c === -1) outTerms.push(new UnaryOp(new Variable(v), NEGATE));
+            else c > 0 ? outTerms.push(new BinaryOp(new Constant(Math.abs(c)), new Variable(v), MULTIPLY)) : outTerms.push(new UnaryOp(new BinaryOp(new Constant(Math.abs(c)), new Variable(v), MULTIPLY), NEGATE))
+        });
+
+        // (b) powers, alphabetical by base then exponent
+        [...exponents.keys()].sort().forEach(key => {
+            const c = exponents.get(key);
+            if (c === 0) return;
+            const [base, exp] = key.split('^');
+            const powerNode = new BinaryOp(new Variable(base), this.parse(exp), POWER);
+            if (c === 1) outTerms.push(powerNode);
+            else if (c === -1) outTerms.push(new UnaryOp(powerNode, NEGATE));
+            else c > 0 ? outTerms.push(new BinaryOp(new Constant(Math.abs(c)), powerNode, MULTIPLY)) : outTerms.push(new UnaryOp(new BinaryOp(new Constant(Math.abs(c)), powerNode, MULTIPLY), NEGATE))
+        });
+
+        // (c) constant
+        if (constSum !== 0) {
+            constSum > 0 ? outTerms.push(new Constant(constSum)) : outTerms.push(new UnaryOp(new Constant(-constSum), NEGATE));
+        }
+
+        // (d) leftovers in original order
+        for (let { node, sign } of leftovers) {
+            outTerms.push(sign == -1 ? new UnaryOp(node, NEGATE) : node);
+        }
+
+        if (outTerms.length === 0) return new Constant(0);
+
+        /* -------- 3. Chain back into left‑deep ADD tree ----- */
+        let result = outTerms[0];
+        for (let i = 1; i < outTerms.length; ++i) {
+            if (outTerms[i].checkName("UnaryOp") && outTerms[i]?.type == NEGATE) {
+                result = new BinaryOp(result, outTerms[i].operand, SUBTRACT);
+            } else result = new BinaryOp(result, outTerms[i], ADD);
+        }
+
+
+        return result;
     }
 
     #gather(node, parts, op, sign = 1) {
@@ -581,6 +667,45 @@ class BinaryOp extends Symbol {
 
         // Leaf or different operator → store with current sign
         parts.push({ node, sign });
+    }
+
+    #astEqual(a, b) {
+        if (a === b) return true;
+
+        // 1. Null / mismatched constructors not equal
+        if (!a || !b || a.constructor !== b.constructor) return false;
+
+        // 2. Per‑class comparisons
+        switch (a.constructor.name) {
+            case 'Constant':
+                return a.value === b.value;
+
+            case 'Variable':
+                return a.value === b.value;
+
+            case 'UnaryOp':
+                return a.type === b.type &&
+                    this.#astEqual(a.operand, b.operand);
+
+            case 'BinaryOp':
+                return a.type === b.type &&
+                    this.#astEqual(a.left, b.left) &&
+                    this.#astEqual(a.right, b.right);
+
+            case 'NAryOp':
+                if (a.type !== b.type || a.arr.length !== b.arr.length) return false;
+                for (let i = 0; i < a.arr.length; ++i) {
+                    if (!this.#astEqual(a.arr[i], b.arr[i])) return false;
+                }
+                return true;
+
+            case 'Polynomial':
+                return a.variable === b.variable &&
+                    this.#astEqual(a.expression, b.expression);
+
+            default:
+                return false;
+        }
     }
 
 }
